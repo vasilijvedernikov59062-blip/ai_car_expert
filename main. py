@@ -1,0 +1,152 @@
+import logging
+from datetime import datetime
+
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field, HttpUrl
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s | %(levelname)s | %(name)s | %(message)s',
+)
+logger = logging.getLogger('car_analyzer_api')
+
+app = FastAPI()
+
+
+class CarAnalyzeRequest(BaseModel):
+    brand: str = Field(min_length=1, max_length=64)
+    model: str = Field(min_length=1, max_length=64)
+    year: int
+    mileage: int
+
+
+class UrlAnalyzeRequest(BaseModel):
+    url: HttpUrl
+
+
+def get_ai_recommendation(year: int, mileage: int) -> tuple[str, str]:
+    """Simple AI-like decision rules for buy/skip recommendation."""
+    current_year = datetime.now().year
+    age = current_year - year
+
+    # Простое правило: старая машина + большой пробег -> skip
+    if age >= 12 and mileage >= 180_000:
+        return (
+            'skip',
+            'Скорее пропустить: авто уже возрастное и с высоким пробегом, риск крупных вложений повышен.',
+        )
+
+    # Во всех прочих нормальных случаях -> buy
+    return (
+        'buy',
+        'Можно рассматривать к покупке: возраст и пробег выглядят разумно для своего класса.',
+    )
+
+
+def generate_alternatives(payload: CarAnalyzeRequest) -> list[dict[str, str | int]]:
+    """Generate 3 similar alternatives with better parameters."""
+    current_year = datetime.now().year
+
+    variants = [
+        {'suffix': 'Plus', 'year_delta': 1, 'mileage_delta': 20_000},
+        {'suffix': 'Comfort', 'year_delta': 2, 'mileage_delta': 35_000},
+        {'suffix': 'Prime', 'year_delta': 3, 'mileage_delta': 50_000},
+    ]
+
+    alternatives: list[dict[str, str | int]] = []
+    for variant in variants:
+        improved_year = min(payload.year + variant['year_delta'], current_year)
+        improved_mileage = max(payload.mileage - variant['mileage_delta'], 0)
+
+        alternatives.append(
+            {
+                'brand': payload.brand,
+                'model': f"{payload.model} {variant['suffix']}",
+                'year': improved_year,
+                'mileage': improved_mileage,
+            }
+        )
+
+    return alternatives
+
+
+def parse_listing_url(url: str) -> CarAnalyzeRequest:
+    """Mock parser of listing URL to extract basic car fields."""
+    normalized = url.lower()
+    logger.info('Parsing listing URL: %s', url)
+
+    if 'toyota' in normalized:
+        return CarAnalyzeRequest(brand='Toyota', model='Camry', year=2018, mileage=90_000)
+    if 'bmw' in normalized:
+        return CarAnalyzeRequest(brand='BMW', model='320i', year=2014, mileage=170_000)
+
+    return CarAnalyzeRequest(brand='Volkswagen', model='Jetta', year=2016, mileage=120_000)
+
+
+def build_analysis(payload: CarAnalyzeRequest) -> dict[str, str | int | list[dict[str, str | int]]]:
+    current_year = datetime.now().year
+    logger.info(
+        'Analyze request: brand=%s model=%s year=%s mileage=%s',
+        payload.brand,
+        payload.model,
+        payload.year,
+        payload.mileage,
+    )
+
+    if payload.year < 1980 or payload.year > current_year:
+        logger.warning('Validation failed: year=%s out of range', payload.year)
+        raise HTTPException(
+            status_code=400,
+            detail=f'year must be between 1980 and {current_year}',
+        )
+
+    if payload.mileage < 0:
+        logger.warning('Validation failed: negative mileage=%s', payload.mileage)
+        raise HTTPException(status_code=400, detail='mileage must be non-negative')
+
+    # Простая формула оценки стоимости
+    base_price = 30000
+    age = current_year - payload.year
+    depreciation_by_age = age * 1200
+    depreciation_by_mileage = payload.mileage * 0.07
+
+    estimated_price = max(int(base_price - depreciation_by_age - depreciation_by_mileage), 1000)
+    decision, reason = get_ai_recommendation(payload.year, payload.mileage)
+    alternatives = generate_alternatives(payload)
+
+    response = {
+        'brand': payload.brand,
+        'model': payload.model,
+        'estimated_price': estimated_price,
+        'decision': decision,
+        'reason': reason,
+        'summary': (
+            f"{payload.brand} {payload.model}: ориентировочная цена ${estimated_price}. "
+            f"Рекомендация: {decision}."
+        ),
+        'alternatives': alternatives,
+    }
+    logger.info('Analysis complete: decision=%s estimated_price=%s', decision, estimated_price)
+    return response
+
+
+@app.get('/health')
+def health() -> dict[str, str]:
+    return {'status': 'ok'}
+
+
+@app.post('/analyze-car')
+def analyze_car(payload: CarAnalyzeRequest) -> dict[str, str | int | list[dict[str, str | int]]]:
+    return build_analysis(payload)
+
+
+@app.post('/analyze-url')
+def analyze_url(payload: UrlAnalyzeRequest) -> dict[str, str | int | list[dict[str, str | int]]]:
+    parsed_payload = parse_listing_url(str(payload.url))
+    analysis = build_analysis(parsed_payload)
+
+    return {
+        'source_url': str(payload.url),
+        'parsed_data': parsed_payload.model_dump(),
+        'analysis': analysis,
+    }
